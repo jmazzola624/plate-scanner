@@ -3,39 +3,43 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Scanner Pro</title>
+    <title>Smart Scanner V3</title>
     <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
     <style>
         body { background-color: #000; color: white; font-family: sans-serif; text-align: center; margin: 0; padding: 10px; }
         
         /* Camera Viewport */
-        #camera-container { position: relative; width: 100%; max-width: 450px; margin: 0 auto; border: 2px solid #333; border-radius: 10px; overflow: hidden; background: #222; }
+        #camera-container { 
+            position: relative; width: 100%; max-width: 450px; margin: 0 auto; 
+            border: 2px solid #333; border-radius: 10px; overflow: hidden; background: #222; 
+        }
         video { width: 100%; display: block; }
         canvas { display: none; }
         
-        /* Aiming Box */
+        /* The Green Box - tells user where to aim */
         .aim-guide {
-            position: absolute; top: 30%; left: 10%; right: 10%; height: 40%;
-            border: 2px dashed rgba(0, 255, 0, 0.7); box-shadow: 0 0 0 1000px rgba(0,0,0,0.5); pointer-events: none;
+            position: absolute; top: 35%; left: 15%; right: 15%; height: 30%;
+            border: 2px solid #00ff00; 
+            box-shadow: 0 0 0 100px rgba(0,0,0,0.7); /* Darkens the outside area */
+            pointer-events: none;
         }
 
-        /* Buttons */
+        /* Controls */
         .controls { display: flex; gap: 10px; justify-content: center; margin-top: 20px; }
         button { flex: 1; padding: 20px; font-size: 16px; font-weight: bold; border: none; border-radius: 8px; cursor: pointer; color: white; }
         #btn-log { background-color: #2980b9; }
         #btn-check { background-color: #f39c12; color: black; }
         
-        /* Status Bar */
+        /* Console/Status */
         #console { 
             margin-top: 20px; padding: 15px; background: #111; border: 1px solid #333; 
-            border-radius: 5px; min-height: 20px; font-family: monospace; font-size: 14px; 
-            white-space: pre-wrap; word-wrap: break-word; color: #0f0;
+            color: #0f0; min-height: 20px; font-family: monospace; white-space: pre-wrap;
         }
     </style>
 </head>
 <body>
 
-    <h3 style="margin: 10px 0;">Plate Scanner V2</h3>
+    <h3 style="margin: 10px 0;">License Plate Scanner</h3>
 
     <div id="camera-container">
         <video id="video" playsinline autoplay></video>
@@ -44,70 +48,112 @@
     <canvas id="canvas"></canvas>
 
     <div class="controls">
-        <button id="btn-log" onclick="processImage('log')">LOG DATA</button>
+        <button id="btn-log" onclick="processImage('log')">LOG PLATE</button>
         <button id="btn-check" onclick="processImage('check')">CHECK DB</button>
     </div>
 
-    <div id="console">Initializing Camera...</div>
+    <div id="console">Loading Engine...</div>
 
     <script>
-        // *** YOUR URL IS NOW PRE-FILLED BELOW ***
+        // *** PASTE YOUR GOOGLE SCRIPT URL HERE ***
         const SCRIPT_URL = "https://script.google.com/macros/s/AKfycbxlL7iYQf7lHD1E394qYi9ExDRJzGJUlmmUCS8hc_OPvCo6rpYyagYZQg-hABd9PtV5/exec"; 
 
         const video = document.getElementById('video');
         const canvas = document.getElementById('canvas');
         const logBox = document.getElementById('console');
+        let worker = null;
 
-        function log(msg) {
-            logBox.innerText = msg;
-            console.log(msg);
+        function log(msg) { logBox.innerText = msg; }
+
+        // 1. SETUP TESSERACT (The "Smart" Engine)
+        async function loadOCR() {
+            log("Initializing Smart OCR...");
+            worker = await Tesseract.createWorker("eng");
+            
+            // CRITICAL: This whitelist forces Tesseract to ignore symbols
+            await worker.setParameters({
+                tessedit_char_whitelist: 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789', 
+            });
+            log("Ready. Aim green box at plate.");
         }
 
-        // 1. START CAMERA
+        // 2. START CAMERA
         navigator.mediaDevices.getUserMedia({ 
             video: { facingMode: 'environment' } 
         }).then(stream => {
             video.srcObject = stream;
-            log("Camera Ready. Point at plate.");
+            loadOCR();
         }).catch(err => {
-            log("CAMERA FAIL: " + err.message);
+            log("Camera Error: " + err.message);
         });
 
-        // 2. PROCESS IMAGE
-        async function processImage(mode) {
-            log("Scanning image... (Hold still)");
+        // 3. SMART CLEANER FUNCTION
+        function fixCommonErrors(text) {
+            // Remove spaces and everything not A-Z or 0-9
+            let clean = text.replace(/[^A-Z0-9]/g, "");
 
-            // Capture frame
+            // Filter out junk results based on length (US Plates are usually 4-8 chars)
+            if (clean.length < 4 || clean.length > 8) return null;
+
+            // Optional: Fix specific confusions (Customize this if needed)
+            // Example: If 8 characters long, it's rare to have 'I' instead of '1'
+            // clean = clean.replace(/I/g, "1"); 
+
+            return clean;
+        }
+
+        async function processImage(mode) {
+            if (!worker) return;
+            log("Scanning... (Hold Steady)");
+
+            // 4. CROP THE IMAGE (Focus only on the green box area)
             canvas.width = video.videoWidth;
             canvas.height = video.videoHeight;
-            canvas.getContext('2d').drawImage(video, 0, 0);
+            const ctx = canvas.getContext('2d');
+            
+            // Draw full image
+            ctx.drawImage(video, 0, 0);
+
+            // Calculate crop area (Matches CSS .aim-guide: top 35%, height 30%)
+            const cropX = canvas.width * 0.15;
+            const cropY = canvas.height * 0.35;
+            const cropWidth = canvas.width * 0.70;
+            const cropHeight = canvas.height * 0.30;
+
+            // Get image data only from the green box
+            const imgData = ctx.getImageData(cropX, cropY, cropWidth, cropHeight);
+            
+            // Put it on a temporary canvas for Tesseract to read
+            const tempCanvas = document.createElement('canvas');
+            tempCanvas.width = cropWidth;
+            tempCanvas.height = cropHeight;
+            tempCanvas.getContext('2d').putImageData(imgData, 0, 0);
 
             try {
-                // Run OCR
-                const { data: { text } } = await Tesseract.recognize(canvas, 'eng');
+                // OCR Recognize
+                const { data: { text } } = await worker.recognize(tempCanvas);
                 
-                // Clean text
-                const cleanText = text.replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
+                const finalPlate = fixCommonErrors(text);
 
-                if (cleanText.length < 3) {
-                    log("Scan failed. No text found. Try again.");
+                if (!finalPlate) {
+                    log(`Ignored noise: "${text.trim()}". \nTry moving closer/steadier.`);
                     return;
                 }
 
-                log(`Read: ${cleanText}. Sending to Sheet...`);
+                log(`Detected: ${finalPlate} \nSending to database...`);
 
                 // Send to Google Sheet
                 await fetch(SCRIPT_URL, {
                     method: 'POST',
                     mode: 'no-cors',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ plate: cleanText, mode: mode })
+                    body: JSON.stringify({ plate: finalPlate, mode: mode })
                 });
 
-                log(`SUCCESS: Sent "${cleanText}" to Sheet!`);
+                log(`SUCCESS: Logged ${finalPlate}`);
 
             } catch (err) {
-                log("ERROR: " + err.message);
+                log("Error: " + err.message);
             }
         }
     </script>
